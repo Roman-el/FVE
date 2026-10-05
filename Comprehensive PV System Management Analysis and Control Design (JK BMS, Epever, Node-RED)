@@ -1,0 +1,59 @@
+# Comprehensive PV System Management Analysis and Control Design (JK BMS, Epever, Node-RED)
+
+This document serves as the final specification for the configuration and automation logic of a photovoltaic system based on a 16S LiFePO4 battery pack (170 Ah) controlled via Node-RED.
+
+---
+
+## 1. Operating State and JK BMS Settings
+
+The system manages a 16S LiFePO4 battery pack with a capacity of **170 Ah** via **JK BMS**.
+
+### Operating Status Requirements
+* **Discharge Current:** The system supports high discharge rates up to **-37.20 A** (approx. **1966.4 W**).
+* **Cell Voltage:** Target nominal cell operating voltage is **3.269 V**, corresponding to the stable linear region of the LiFePO4 discharge curve.
+* **Cell Balance (Cell Volt. Diff.):** The maximum allowable cell-to-cell delta is **0.028 V** under high load (>37 A), ensuring low and homogeneous internal cell resistance (~0.052–0.054 mΩ).
+* **Balancing Control:** Balancing is inactive by default (`Balance: OFF`) and triggers only upon reaching the overvoltage startup condition.
+
+### Advanced Settings Specification
+To prevent premature emergency cut-offs at the extreme chemical limits of LiFePO4, the BMS parameters are configured as follows:
+
+* **Cell OVP (Over-Voltage Protection):** Set to **3.650 V**. This prevents early shutdown when the fastest cell spikes during the final charge phase.
+* **SOC-100% Volt.:** Set to **3.450 V – 3.500 V** to ensure a reliable capacity indicator (SOC) reset to 100% even at lower charging currents.
+* **Cell UVP (Under-Voltage Protection):** Set to **2.600 V** (conservative) or **2.500 V** (absolute chemical floor) to maximize usable capacity.
+* **Power Off Vol.:** Set to **2.400 V** (always lower than *Cell UVP*) so the BMS retains power to log cell under-voltage alarms before shutting down.
+
+---
+
+## 2. Three-Stage Cascaded Protection Architecture
+
+The battery protection is structured into three independent, layered levels:
+1. **Node-RED (RPI1):** Software controller; keeps the battery within its optimal operational envelope.
+2. **Epever (100A, 5000W MPPT):** Hardware charge and regulation protection layer.
+3. **JK BMS:** Emergency cut-off at the bottom of the cascade, acting only if higher software/charge controller layers fail.
+
+### Parameter Alignment (Epever vs. JK BMS)
+
+To eliminate error states and harsh BMS load disconnects, protection limits are aligned with the Epever controller parameters:
+
+| Function / Parameter | Epever Value | JK BMS Target Value | Cascaded Logic Role |
+| :--- | :---: | :---: | :--- |
+| **Max Upper Protection** | **55.8 V** *(High Voltage Disconnect)* | **3.650 V / cell** *(58.4 V total)* | Epever safely stops charging at 55.8 V. BMS acts strictly as emergency backup. |
+| **Capacity Reset (100%)** | **55.6 V** *(Charging Limit)* | **3.460 V / cell** | BMS SOC percentage resets to 100% precisely when Epever reaches its charge ceiling. |
+| **Balance Start** | **54.2 V** *(Boost / Equalization)* | **3.350 V / cell** | Active balancing begins proactively as the battery enters the Boost phase. |
+| **Lower Protection** | **48.0 V** *(Low Voltage Disconnect)* | **2.650 V / cell** *(42.4 V total)* | Epever disconnects loads first at 48.0 V. BMS protects against single-cell drift. |
+
+*Epever Configuration Note:* The `Equalization Duration` parameter must remain disabled (0 min), as LiFePO4 chemistry does not require desulfation. `Boost Duration` set to 30 minutes provides adequate time for the JK BMS balance cycle.
+
+---
+
+## 3. Automation Logic (Node-RED)
+
+Main energy flow control is performed by a **Raspberry Pi 1 (RPI1)** running Node-RED. System state is derived from telemetry provided by the **Epever controller, Shelly EM (50A), and a Tasmota smart plug**. Control signals are distributed via MQTT to an **ESP32**, which handles relay switching for two inverters and two Automatic Transfer Switches (ATS).
+
+### Control Architecture Rules
+* **Inverter 1 (Primary Home Inverter):** Powers the home circuit as long as battery voltage remains safe. If battery voltage drops below **49.8 V**, ATS 1 transfers the load to the grid (GRID).
+* **Inverter 2 (Auxiliary High-Load Inverter):** Engages only when total power consumption exceeds **2500 W** (measured via Shelly EM) and battery voltage is sufficient (**> 51.5 V**). It turns off when load drops below **1500 W**.
+* **Water Heater / Boiler (3kW, Tasmota):** Serves as dynamic excess power dump. Activation occurs when battery voltage exceeds **54.2 V** and turns off during cloud cover or when voltage drops below **53.0 V**.
+* **Watchdog Safety System:** RPI1 sends periodic heartbeat pings to the ESP32. If communications with Epever freeze or RPI1 fails, the ESP32 misses the ping threshold and automatically switches all inverters and ATS units to failsafe state (Grid Bypass).
+
+*This document represents the current specification for local hardware setup and automation logic.*
